@@ -4,81 +4,81 @@ const connections = new Map();
 
 wss.on("connection", (ws) => {
   let connectionId = null;
+  let isAlive = true;
+
+  const heartbeat = () => {
+    isAlive = true;
+  };
+
+  ws.on('pong', heartbeat);
 
   ws.on("message", (message) => {
     try {
       const data = JSON.parse(message);
-      console.log(`Received message type: ${data.type}`);
+      console.log(`Received ${data.type} from ${data.connectionId || 'unknown'}`);
 
       switch(data.type) {
         case 'register':
           connectionId = data.connectionId;
           connections.set(connectionId, ws);
-          console.log(`Registered connection: ${connectionId}`);
           ws.send(JSON.stringify({
-            type: 'registrationConfirmed',
-            connectionId
+            type: 'registered',
+            connectionId,
+            peers: Array.from(connections.keys())
           }));
           break;
 
         case 'connect':
           if (connections.has(data.targetId)) {
-            const targetWs = connections.get(data.targetId);
-            targetWs.send(JSON.stringify({
+            connections.get(data.targetId).send(JSON.stringify({
               type: 'connectionRequest',
               senderId: data.senderId
             }));
-            console.log(`Routing connection request from ${data.senderId} to ${data.targetId}`);
           } else {
             ws.send(JSON.stringify({
               type: 'error',
-              message: 'Target connection not found'
+              message: 'Peer unavailable'
             }));
           }
           break;
 
         case 'signal':
           if (['offer', 'answer', 'candidate'].includes(data.signalType)) {
-            const targetWs = connections.get(data.targetId);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-              targetWs.send(JSON.stringify(data));
-              console.log(`Forwarded ${data.signalType} to ${data.targetId}`);
+            const target = connections.get(data.targetId);
+            if (target?.readyState === WebSocket.OPEN) {
+              target.send(JSON.stringify(data));
             }
           }
           break;
 
         default:
-          ws.send(JSON.stringify({
-            type: 'error',
-            message: 'Unknown message type'
-          }));
+          ws.send(JSON.stringify({ type: 'error', message: 'Invalid message type' }));
       }
     } catch (err) {
-      console.error("Message handling error:", err);
+      console.error("Message error:", err);
     }
   });
 
-  ws.on('close', () => {
-    console.log(`Connection closed: ${connectionId}`);
+  const interval = setInterval(() => {
+    if (!isAlive) {
+      ws.terminate();
+      return;
+    }
+    isAlive = false;
+    ws.ping();
+  }, 30000);
+
+  ws.on("close", () => {
+    clearInterval(interval);
     if (connectionId) {
       connections.delete(connectionId);
+      console.log(`Connection ${connectionId} removed`);
     }
   });
 
-  ws.on('error', (error) => {
-    console.error(`WebSocket error: ${error.message}`);
+  ws.on("error", (error) => {
+    console.error("WS error:", error);
   });
 });
 
-// Cleanup stale connections periodically
-setInterval(() => {
-  console.log(`Active connections: ${connections.size}`);
-  connections.forEach((ws, id) => {
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.log(`Removing stale connection: ${id}`);
-      connections.delete(id);
-    }
-  });
-}, 30000);
-
-console.log(`Signaling server running on port: ${process.env.PORT || 8080}`);
+console.log(`Signaling server running on port ${process.env.PORT || 8080}`);
